@@ -1,0 +1,38 @@
+[project]
+name = "stageflow"
+version = "0.1.0"
+description = "A smart CLI tool for selective, fail-fast code synchronization between development and production Git repositories with built-in pre-flight testing."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer",
+    "gitpython",
+    "pathspec",
+    "tomlkit"
+]
+
+[project.scripts]
+stageflow = "stageflow.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+    "mypy",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
