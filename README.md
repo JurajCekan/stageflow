@@ -1,10 +1,10 @@
 # StageFlow
 
-🚀 A smart CLI tool for selective, fail-fast code synchronization between development and production Git repositories with built-in pre-flight testing.
+🚀 A smart CLI tool for selective, fail-fast code synchronization between development and production Git repositories with built-in pre-flight testing and code quality checks.
 
 ## 1. Introduction
 
-StageFlow is a robust, "fail-fast" Command Line Interface (CLI) tool meticulously designed to enforce rigorous pre-flight validation before executing Git-based release or staging workflows. It acts as an uncompromising gatekeeper between your development branch and your production repository, guaranteeing that code is fully tested and validated before synchronization. Because deploying directly to production without running tests is a thrill ride nobody actually wants to be on.
+StageFlow is a robust, "fail-fast" Command Line Interface (CLI) tool meticulously designed to enforce rigorous pre-flight validation before executing Git-based release or staging workflows. It acts as an uncompromising gatekeeper between your development branch and your production repository, guaranteeing that code is fully formatted, typed, tested, and validated before synchronization. Because deploying directly to production without running tests and lint check is a thrill ride nobody actually wants to be on.
 
 ## 2. Installation
 
@@ -36,9 +36,8 @@ uv init
 uv add typer gitpython pathspec tomlkit
 
 # Add development dependencies
-uv add --dev pytest black ruff mypy
+uv add --dev pytest black ruff mypy pytest-cov
 ```
-*(Yes, it brings enough dependencies to make you feel safe, but not enough to slow down your CI.)*
 
 ## 3. Configuration (`stageflow.toml`)
 
@@ -110,17 +109,42 @@ stageflow release <env> [OPTIONS]
 
 *   **`<env>` (Required):** The target environment branch you are releasing to (e.g., `alpha`, `beta`, `main`).
 *   **`--dry-run` (Optional):** Simulates the entire release process—including file synchronization and Git operations—without actually modifying any files or committing history. Highly recommended for establishing trust before making irreversible changes.
+*   **`--commit` (Optional):** A boolean flag that commits all synchronization changes in the production repository with an automatically generated message: `release(<env>): sync from dev@<short_hash> [<timestamp>]`.
+*   **`--commit-message <message>` (Optional):** Commits all changes in the production repository with the specified custom message.
+*   **`--push` (Optional):** A boolean flag that pushes the committed changes to the production repository's remote origin.
+
+### Validation Rules for Git Operations
+- **Mutual Exclusivity:** `--commit` and `--commit-message` cannot be used together. If both are specified, the program will abort.
+- **Message Validation:** `--commit-message` cannot be empty or contain only whitespace. If it does, the program will abort.
+- **Push Validation:** `--push` requires either `--commit` or `--commit-message` to be specified. Running `--push` without selecting a commit option will abort.
 
 ## 5. Pre-Flight Policy
 
-The StageFlow pre-flight phase is a strict, non-negotiable step. Every execution *must* run the configured test suite. StageFlow monitors the command's exit status and will immediately and strictly abort the entire process if it encounters a failure (i.e., when the test command returns `returncode != 0`). 
+The StageFlow pre-flight phase is a strict, non-negotiable step. Every execution *must* validate the environment and code quality. Before synchronizing files, StageFlow automatically:
 
-By failing fast, StageFlow guarantees that broken code, failing tests, or unhandled exceptions never make it into your target repository. It's not personal; bad code simply doesn't get past the bouncer. This maintains data integrity and ensures your staging and production environments remain stable.
+1.  **Ensures Clean Workspace:** Aborts immediately if the development repository contains uncommitted or untracked changes.
+2.  **Switches to Stable Branch:** Switches the development repository to your configured `dev_repo.stable_branch` (defaults to `main`), fetches, and pulls the latest updates.
+3.  **Runs Formatting & Lint Checks:**
+    - **Python Projects:** If `pyproject.toml`, `requirements.txt`, or `setup.py` are detected, it executes `ruff check .` and `mypy .` (wrapped in `uv run` if a `uv.lock` is present).
+    - **Laravel Projects:** If `composer.json` and `vendor/bin/pint` are detected, it executes `./vendor/bin/pint --test` to verify code style formatting.
+    - If formatting or linting fails, it aborts immediately.
+4.  **Runs Test Suite:** Executes the test suite command configured under `pre_flight.tests.command` (e.g. `pytest` or `phpunit`). If tests fail, it aborts immediately.
 
-## 6. User Experience (UX)
+By failing fast, StageFlow guarantees that broken code, unformatted files, failing tests, or unhandled exceptions never make it into your target repository. It's not personal; bad code simply doesn't get past the bouncer.
 
-To ensure clarity during complex operations, StageFlow employs semantic, color-coded terminal output. This visual hierarchy clearly separates StageFlow's native execution logging from the output of underlying tools (like `pytest` or `git`).
+## 6. Advanced Selective Synchronization
+
+StageFlow performs a complete, bi-directional path comparison between the development and production repositories:
+- **Exclusion Matching:** Respects `sync.exclude` rules, pruning directory scans early to optimize sync speed.
+- **Additions and Modifications:** Compares files and syncs new or modified files (content checks using `filecmp.cmp`).
+- **Deletions Synchronization:** Identifies files and directories that were deleted in the development branch and deletes them in production.
+- **Safety Protection:** When deleting directories in production, if they contain local-only excluded files, StageFlow automatically preserves the directory and its excluded files intact.
+
+## 7. User Experience (UX)
+
+To ensure clarity during complex operations, StageFlow employs semantic, color-coded terminal output. This visual hierarchy clearly separates StageFlow's native execution logging from the output of underlying tools (like `pytest`, `ruff`, `mypy`, `pint`, or `git`).
 
 *   🟢 **Green:** Success messages and successful phase transitions.
 *   🔴 **Red:** Critical errors and pre-flight failures (the fail-fast trigger).
 *   🟡 **Yellow:** Warnings and informative output during `--dry-run` executions.
+*   🔵 **Cyan/Blue:** Headers, command boundaries, and info messages.

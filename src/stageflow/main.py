@@ -1,15 +1,11 @@
-"""
-Main module for the StageFlow CLI.
-Serves as the main entry point and terminal user interface (UI).
-"""
-
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 
-from stageflow import config, git_ops, pre_flight
+from stageflow import config, git_ops
 
 # Initialize Typer application
 app = typer.Typer(help="StageFlow: Selective Git synchronization tool.")
@@ -51,24 +47,53 @@ def release(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Simulate the release process without modifying files or Git history."
     ),
+    commit: bool = typer.Option(
+        False, "--commit", help="Commit changes in production repository with auto-generated message."
+    ),
+    commit_message: Optional[str] = typer.Option(
+        None, "--commit-message", help="Commit changes in production repository with a custom message."
+    ),
+    push: bool = typer.Option(
+        False,
+        "--push",
+        help="Push committed changes to the remote. Can only be used with --commit or --commit-message.",
+    ),
 ) -> None:
     """
     Perform a selective Git synchronization to the target environment.
     """
+    if commit and commit_message is not None:
+        typer.secho("Error: --commit and --commit-message cannot be used together.", fg=typer.colors.RED)
+        sys.exit(1)
+
+    if commit_message is not None and not commit_message.strip():
+        typer.secho("Error: --commit-message cannot be empty.", fg=typer.colors.RED)
+        sys.exit(1)
+
+    if push and not commit and commit_message is None:
+        typer.secho("Error: --push can only be used if --commit or --commit-message is specified.", fg=typer.colors.RED)
+        sys.exit(1)
+
     repo_path = Path.cwd().resolve()
     try:
         # Load local configuration
         cfg = config.load_local_config(repo_path)
-
-        # Run pre-flight checks
-        pre_flight.run_all_checks(repo_path, cfg)
 
         # Execution
         if dry_run:
             typer.secho("⚠️ DRY RUN MODE ACTIVATED", fg=typer.colors.YELLOW, bold=True)
 
         prod_repo_path = Path(cfg["repository"]["production"]["path"]).expanduser().resolve()
-        git_ops.perform_release(repo_path, prod_repo_path, env, cfg, dry_run=dry_run)
+        git_ops.perform_release(
+            repo_path,
+            prod_repo_path,
+            env,
+            cfg,
+            dry_run=dry_run,
+            commit=commit,
+            commit_message=commit_message,
+            push=push,
+        )
 
         # Completion
         typer.secho("Successfully performed release.", fg=typer.colors.GREEN)
