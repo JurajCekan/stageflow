@@ -86,7 +86,7 @@ StageFlow provides intuitive commands for managing your release pipelines.
 StageFlow provides two ways to scaffold your `stageflow.toml` configuration file in the current directory:
 
 **Interactive Initialization (Default):**
-Walks you through a series of prompts to set up your project name, production path, and test command.
+Walks you through a series of prompts to set up your project name, production path, test command, and stable branch (which can be left empty).
 
 ```bash
 stageflow init
