@@ -1,10 +1,11 @@
+import filecmp
 import logging
 import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import git
 import pathspec
@@ -39,9 +40,45 @@ def ensure_clean_workspace(repo_path: Path) -> git.Repo:
     return repo
 
 
+def get_non_excluded_paths(base_dir: Path, spec: pathspec.PathSpec[Any]) -> Dict[str, Path]:
+    """
+    Recursively finds all non-excluded files and directories in base_dir.
+    Returns a dict mapping relative path string to the absolute Path object.
+    For directories, the relative path string ends with a trailing slash '/'.
+
+    Args:
+        base_dir: The base directory to scan.
+        spec: The pathspec instance to filter with.
+
+    Returns:
+        Dict[str, Path]: Mapping of relative path strings to Path objects.
+    """
+    paths = {}
+
+    def walk(current_dir: Path) -> None:
+        for path in current_dir.iterdir():
+            rel_path = path.relative_to(base_dir)
+            if path.is_dir():
+                rel_path_str = str(rel_path) + "/"
+                if spec.match_file(rel_path_str):
+                    continue
+                paths[rel_path_str] = path
+                walk(path)
+            else:
+                rel_path_str = str(rel_path)
+                if spec.match_file(rel_path_str):
+                    continue
+                paths[rel_path_str] = path
+
+    if base_dir.exists():
+        walk(base_dir)
+    return paths
+
+
 def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_run: bool) -> None:
     """
     Synchronizes files from src_dir to dest_dir, ignoring exclude_patterns.
+    Computes added, modified, and deleted files and directories, and applies them.
 
     Args:
         src_dir (Path): Source directory.
@@ -51,32 +88,118 @@ def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_r
     """
     spec = pathspec.PathSpec.from_lines("gitignore", exclude_patterns)
 
-    for file_path in src_dir.rglob("*"):
-        if not file_path.is_file():
-            continue
+    src_paths = get_non_excluded_paths(src_dir, spec)
+    dest_paths = get_non_excluded_paths(dest_dir, spec)
 
-        rel_path = file_path.relative_to(src_dir)
+    new_dirs: List[str] = []
+    changed_files: List[str] = []
+    deleted_files: List[str] = []
+    deleted_dirs: List[str] = []
 
-        if spec.match_file(str(rel_path)):
-            logger.debug(f"Skipping {rel_path} (matched exclude pattern)")
-            continue
-
-        dest_path = dest_dir / rel_path
-
-        if dry_run:
-            logger.info(f"Dry-run: Would copy {rel_path} to {dest_dir}")
-            typer.echo(f"Dry-run: Would copy {rel_path}")
+    # 1. Identify additions and modifications
+    for rel_path, src_path in src_paths.items():
+        if rel_path.endswith("/"):
+            if rel_path not in dest_paths:
+                new_dirs.append(rel_path)
         else:
+            if rel_path not in dest_paths:
+                changed_files.append(rel_path)
+            else:
+                # Compare file contents
+                dest_path = dest_paths[rel_path]
+                if not filecmp.cmp(src_path, dest_path, shallow=False):
+                    changed_files.append(rel_path)
+
+    # 2. Identify deletions
+    for rel_path in dest_paths.keys():
+        if rel_path not in src_paths:
+            if rel_path.endswith("/"):
+                deleted_dirs.append(rel_path)
+            else:
+                deleted_files.append(rel_path)
+
+    if dry_run:
+        if new_dirs or changed_files or deleted_files or deleted_dirs:
+            typer.secho("\n📋 Sync Plan (Dry Run):", fg=typer.colors.CYAN, bold=True)
+            if new_dirs:
+                typer.secho("Directories to create:", fg=typer.colors.GREEN, bold=True)
+                for d in sorted(new_dirs):
+                    typer.echo(f"  + {d}")
+            if changed_files:
+                typer.secho("Files to copy/update:", fg=typer.colors.GREEN, bold=True)
+                for f in sorted(changed_files):
+                    typer.echo(f"  -> {f}")
+            if deleted_files:
+                typer.secho("Files to delete:", fg=typer.colors.RED, bold=True)
+                for f in sorted(deleted_files):
+                    typer.echo(f"  - {f}")
+            if deleted_dirs:
+                typer.secho("Directories to delete:", fg=typer.colors.RED, bold=True)
+                for d in sorted(deleted_dirs, key=len, reverse=True):
+                    typer.echo(f"  - {d}")
+        else:
+            typer.echo("Dry-run: No changes detected to release.")
+        return
+
+    # Non dry-run execution
+    # First delete files
+    for f in sorted(deleted_files):
+        dest_file = dest_dir / f
+        if dest_file.exists():
             try:
-                os.makedirs(dest_path.parent, exist_ok=True)
-                shutil.copy2(file_path, dest_path)
+                os.remove(dest_file)
+                logger.info("Deleted file: %s", dest_file)
             except OSError as e:
-                logger.error(f"Failed to copy {file_path} to {dest_path}: {e}")
-                typer.secho(f"Error: Failed to copy file {rel_path}: {e}", fg=typer.colors.RED)
+                logger.error("Failed to delete file %s: %s", dest_file, e)
+                typer.secho(f"Error: Failed to delete file {f}: {e}", fg=typer.colors.RED)
                 sys.exit(1)
 
+    # Delete directories (sort by length descending to process children before parents)
+    for d in sorted(deleted_dirs, key=len, reverse=True):
+        dest_path = dest_dir / d
+        if dest_path.exists() and dest_path.is_dir():
+            try:
+                os.rmdir(dest_path)
+                logger.info("Deleted directory: %s", dest_path)
+            except OSError as e:
+                # Expected when directory is not empty (e.g. contains excluded files)
+                logger.debug("Skipping deletion of non-empty directory %s: %s", dest_path, e)
 
-def perform_release(dev_repo_path: Path, prod_repo_path: Path, target_env: str, config: Dict[str, Any], dry_run: bool) -> None:
+    # Create directories
+    for d in sorted(new_dirs):
+        dest_path = dest_dir / d
+        try:
+            os.makedirs(dest_path, exist_ok=True)
+            logger.info("Created directory: %s", dest_path)
+        except OSError as e:
+            logger.error("Failed to create directory %s: %s", dest_path, e)
+            typer.secho(f"Error: Failed to create directory {d}: {e}", fg=typer.colors.RED)
+            sys.exit(1)
+
+    # Copy / update files
+    for f in sorted(changed_files):
+        src_file = src_dir / f
+        dest_file = dest_dir / f
+        try:
+            os.makedirs(dest_file.parent, exist_ok=True)
+            shutil.copy2(src_file, dest_file)
+            logger.info("Copied file: %s -> %s", src_file, dest_file)
+        except OSError as e:
+            logger.error("Failed to copy file %s to %s: %s", src_file, dest_file, e)
+            typer.secho(f"Error: Failed to copy file {f}: {e}", fg=typer.colors.RED)
+            sys.exit(1)
+
+
+def perform_release(
+    dev_repo_path: Path,
+    prod_repo_path: Path,
+    target_env: str,
+    config: Dict[str, Any],
+    dry_run: bool,
+    commit: bool = False,
+    commit_message: Optional[str] = None,
+    push: bool = False,
+) -> None:
     """
     Orchestrates the release process between dev and prod repositories.
 
@@ -86,57 +209,76 @@ def perform_release(dev_repo_path: Path, prod_repo_path: Path, target_env: str, 
         target_env (str): The target environment (branch) to release to.
         config (Dict): Configuration dictionary.
         dry_run (bool): If True, do not commit or push changes.
+        commit (bool): If True, commit changes with auto-generated message.
+        commit_message (str, optional): Custom commit message to use.
+        push (bool): If True, push committed changes to remote.
     """
     logger.info("Starting pre-flight Git checks...")
     dev_repo = ensure_clean_workspace(dev_repo_path)
-    prod_repo = ensure_clean_workspace(prod_repo_path)
 
     stable_branch = config.get("dev_repo", {}).get("stable_branch", "main")
-    auto_push = config.get("prod_repo", {}).get("auto_push", False)
     exclude_patterns = config.get("sync", {}).get("exclude", [])
 
     try:
-        logger.info(f"Preparing dev repo: fetching and checking out {stable_branch}")
+        logger.info("Preparing dev repo: fetching and checking out %s", stable_branch)
         dev_repo.remotes.origin.fetch()
         dev_repo.git.checkout(stable_branch)
         dev_repo.remotes.origin.pull()
         short_hash = dev_repo.head.commit.hexsha[:7]
+    except git.exc.GitCommandError as e:
+        logger.error("Git command failed during dev repo preparation: %s", e)
+        typer.secho(f"Git error: {e}", fg=typer.colors.RED)
+        sys.exit(1)
 
-        logger.info(f"Preparing prod repo: fetching and checking out {target_env}")
+    # Run pre-flight formatting checks and tests on the stable branch
+    from stageflow import pre_flight
+
+    pre_flight.run_all_checks(dev_repo_path, config)
+
+    prod_repo = ensure_clean_workspace(prod_repo_path)
+    try:
+        logger.info("Preparing prod repo: fetching and checking out %s", target_env)
         prod_repo.remotes.origin.fetch()
         prod_repo.git.checkout(target_env)
         prod_repo.remotes.origin.pull()
     except git.exc.GitCommandError as e:
-        logger.error(f"Git command failed during preparation: {e}")
+        logger.error("Git command failed during prod repo preparation: %s", e)
         typer.secho(f"Git error: {e}", fg=typer.colors.RED)
         sys.exit(1)
 
     logger.info("Starting synchronization...")
-    # In tests we hardcoded [] so to make test pass we might need to adjust test or just use []
-    # But ideally it should use exclude_patterns. We'll use exclude_patterns but let's check tests.
     sync_files(dev_repo_path, prod_repo_path, exclude_patterns, dry_run)
 
     if dry_run:
         typer.secho("Dry-run: Skipping git add, commit, and push.", fg=typer.colors.YELLOW)
         return
 
-    try:
-        prod_repo.git.add(all=True)
-        # GitPython is_dirty() returns boolean. We check both is_dirty and untracked_files
-        if not prod_repo.is_dirty() and not prod_repo.untracked_files:
-            logger.info("No changes to release.")
-            typer.echo("No changes to release")
-            sys.exit(0)
+    should_commit = commit or (commit_message is not None)
 
-        current_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        commit_msg = f"release({target_env}): sync from dev@{short_hash} [{current_timestamp}]"
-        prod_repo.index.commit(commit_msg)
+    if should_commit:
+        try:
+            prod_repo.git.add(all=True)
+            if not prod_repo.is_dirty(untracked_files=True):
+                logger.info("No changes to release.")
+                typer.echo("No changes to release")
+                return
 
-        if auto_push:
-            logger.info("Pushing to remote...")
-            prod_repo.remotes.origin.push()
+            if commit_message:
+                resolved_msg = commit_message
+            else:
+                current_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                resolved_msg = f"release({target_env}): sync from dev@{short_hash} [{current_timestamp}]"
 
-    except git.exc.GitCommandError as e:
-        logger.error(f"Git command failed during commit/push: {e}")
-        typer.secho(f"Git error: {e}", fg=typer.colors.RED)
-        sys.exit(1)
+            logger.info("Committing changes with message: %s", resolved_msg)
+            prod_repo.index.commit(resolved_msg)
+            typer.secho("Committed changes in production repository.", fg=typer.colors.GREEN)
+
+            if push:
+                logger.info("Pushing changes to remote...")
+                prod_repo.remotes.origin.push()
+                typer.secho("Pushed changes to remote repository.", fg=typer.colors.GREEN)
+
+        except git.exc.GitCommandError as e:
+            logger.error("Git command failed during commit/push: %s", e)
+            typer.secho(f"Git error: {e}", fg=typer.colors.RED)
+            sys.exit(1)
