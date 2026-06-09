@@ -22,17 +22,21 @@ def init(blank: bool = typer.Option(False, "--blank", help="Generate a blank tem
     cwd = Path.cwd().resolve()
     try:
         if blank:
-            config.create_local_config(cwd, project_name="", prod_path="", test_command="", is_blank=True)
+            config.create_local_config(
+                cwd, project_name="", prod_path="", test_command="", stable_branch="", is_blank=True
+            )
             typer.secho("Successfully initialized blank configuration.", fg=typer.colors.GREEN)
         else:
             project_name = typer.prompt("Project Name")
             prod_path = typer.prompt("Production Repository Path")
             test_command = typer.prompt("Test Command")
+            stable_branch = typer.prompt("Stable Branch", default="")
             config.create_local_config(
                 cwd,
                 project_name=project_name,
                 prod_path=prod_path,
                 test_command=test_command,
+                stable_branch=stable_branch,
                 is_blank=False,
             )
             typer.secho("Successfully initialized configuration.", fg=typer.colors.GREEN)

@@ -119,6 +119,7 @@ def create_local_config(
     project_name: str,
     prod_path: str,
     test_command: str,
+    stable_branch: str = "",
     is_blank: bool = False,
 ) -> None:
     """
@@ -129,12 +130,14 @@ def create_local_config(
         project_name: Name of the project.
         prod_path: Absolute path to the production repository.
         test_command: Command to run pre-flight tests.
+        stable_branch: Branch in the dev repository to sync from.
         is_blank: If True, creates a template configuration with empty/fallback values.
     """
     if is_blank:
         project_name = project_name or repo_path.name
         prod_path = prod_path or ""
         test_command = test_command or ""
+        stable_branch = stable_branch or ""
 
     doc = tomlkit.document()
 
@@ -162,6 +165,11 @@ def create_local_config(
     sync_table = tomlkit.table()
     sync_table.add("exclude", [".git/", ".github/", "tests/", "stageflow.toml"])
     doc.add("sync", sync_table)
+
+    # [dev_repo] table
+    dev_repo_table = tomlkit.table()
+    dev_repo_table.add("stable_branch", stable_branch)
+    doc.add("dev_repo", dev_repo_table)
 
     config_file = repo_path / "stageflow.toml"
     try:
