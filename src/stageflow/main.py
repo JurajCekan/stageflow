@@ -62,6 +62,11 @@ def release(
         "--push",
         help="Push committed changes to the remote. Can only be used with --commit or --commit-message.",
     ),
+    output_plan: Optional[Path] = typer.Option(
+        None,
+        "--output-plan",
+        help="Path to write the sync plan markdown file. Defaults to sync-plan.md in dry-run mode.",
+    ),
 ) -> None:
     """
     Perform a selective Git synchronization to the target environment.
@@ -87,6 +92,10 @@ def release(
         if dry_run:
             typer.secho("⚠️ DRY RUN MODE ACTIVATED", fg=typer.colors.YELLOW, bold=True)
 
+        resolved_output_plan = None
+        if dry_run or output_plan is not None:
+            resolved_output_plan = (output_plan or Path("sync-plan.md")).resolve()
+
         prod_repo_path = Path(cfg["repository"]["production"]["path"]).expanduser().resolve()
         git_ops.perform_release(
             repo_path,
@@ -97,6 +106,7 @@ def release(
             commit=commit,
             commit_message=commit_message,
             push=push,
+            output_plan=resolved_output_plan,
         )
 
         # Completion

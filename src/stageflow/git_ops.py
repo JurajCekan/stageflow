@@ -75,9 +75,9 @@ def get_non_excluded_paths(base_dir: Path, spec: pathspec.PathSpec[Any]) -> Dict
     return paths
 
 
-def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_run: bool) -> None:
-    """
-    Synchronizes files from src_dir to dest_dir, ignoring exclude_patterns.
+def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_run: bool) -> Dict[str, List[str]]:
+    """Synchronizes files from src_dir to dest_dir, ignoring exclude_patterns.
+
     Computes added, modified, and deleted files and directories, and applies them.
 
     Args:
@@ -85,6 +85,9 @@ def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_r
         dest_dir (Path): Destination directory.
         exclude_patterns (List[str]): List of gitignore-style patterns to exclude.
         dry_run (bool): If True, only log actions without executing them.
+
+    Returns:
+        Dict[str, List[str]]: A dictionary of changes grouped by category.
     """
     spec = pathspec.PathSpec.from_lines("gitignore", exclude_patterns)
 
@@ -118,6 +121,13 @@ def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_r
             else:
                 deleted_files.append(rel_path)
 
+    changes = {
+        "new_dirs": new_dirs,
+        "changed_files": changed_files,
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+    }
+
     if dry_run:
         if new_dirs or changed_files or deleted_files or deleted_dirs:
             typer.secho("\n📋 Sync Plan (Dry Run):", fg=typer.colors.CYAN, bold=True)
@@ -139,7 +149,7 @@ def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_r
                     typer.echo(f"  - {d}")
         else:
             typer.echo("Dry-run: No changes detected to release.")
-        return
+        return changes
 
     # Non dry-run execution
     # First delete files
@@ -189,6 +199,75 @@ def sync_files(src_dir: Path, dest_dir: Path, exclude_patterns: List[str], dry_r
             typer.secho(f"Error: Failed to copy file {f}: {e}", fg=typer.colors.RED)
             sys.exit(1)
 
+    return changes
+
+
+def write_sync_plan(
+    output_path: Path,
+    target_env: str,
+    stable_branch: str,
+    changes: Dict[str, List[str]],
+    dry_run: bool,
+) -> None:
+    """Writes the synchronization plan in Markdown format to the specified path.
+
+    Args:
+        output_path (Path): Path where the plan will be written.
+        target_env (str): Target environment (branch) name.
+        stable_branch (str): Stable development branch name.
+        changes (Dict[str, List[str]]): Dictionary mapping change types to lists of paths.
+        dry_run (bool): Flag indicating if this is a dry-run release simulation.
+    """
+    lines = [
+        "# 📋 StageFlow Sync Plan",
+        "",
+        f"- **Target Environment:** `{target_env}`",
+        f"- **Stable Branch:** `{stable_branch}`",
+        f"- **Generated At:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
+        f"- **Mode:** `{'Dry-Run' if dry_run else 'Execution'}`",
+        "",
+        "## 📊 Summary",
+        f"- **Directories to create:** {len(changes['new_dirs'])}",
+        f"- **Files to copy/update:** {len(changes['changed_files'])}",
+        f"- **Files to delete:** {len(changes['deleted_files'])}",
+        f"- **Directories to delete:** {len(changes['deleted_dirs'])}",
+        "",
+    ]
+
+    if changes["new_dirs"]:
+        lines.extend(["### 📁 Directories to Create", ""])
+        for d in sorted(changes["new_dirs"]):
+            lines.append(f"- `+ {d}`")
+        lines.append("")
+
+    if changes["changed_files"]:
+        lines.extend(["### 📄 Files to Copy/Update", ""])
+        for f in sorted(changes["changed_files"]):
+            lines.append(f"- `-> {f}`")
+        lines.append("")
+
+    if changes["deleted_files"]:
+        lines.extend(["### ❌ Files to Delete", ""])
+        for f in sorted(changes["deleted_files"]):
+            lines.append(f"- `- {f}`")
+        lines.append("")
+
+    if changes["deleted_dirs"]:
+        lines.extend(["### 🗑️ Directories to Delete", ""])
+        for d in sorted(changes["deleted_dirs"], key=len, reverse=True):
+            lines.append(f"- `- {d}`")
+        lines.append("")
+
+    try:
+        resolved_path = output_path.resolve()
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.write_text("\n".join(lines), encoding="utf-8")
+        logger.info("Sync plan successfully exported to %s", resolved_path)
+    except OSError as e:
+        logger.error("Failed to write sync plan to %s: %s", output_path, e)
+        typer.secho(f"Error: Failed to write sync plan to {output_path}: {e}", fg=typer.colors.RED)
+        sys.exit(1)
+
 
 def perform_release(
     dev_repo_path: Path,
@@ -199,9 +278,9 @@ def perform_release(
     commit: bool = False,
     commit_message: Optional[str] = None,
     push: bool = False,
+    output_plan: Optional[Path] = None,
 ) -> None:
-    """
-    Orchestrates the release process between dev and prod repositories.
+    """Orchestrates the release process between dev and prod repositories.
 
     Args:
         dev_repo_path (Path): Path to the development repository.
@@ -212,6 +291,7 @@ def perform_release(
         commit (bool): If True, commit changes with auto-generated message.
         commit_message (str, optional): Custom commit message to use.
         push (bool): If True, push committed changes to remote.
+        output_plan (Path, optional): Path where the markdown sync plan should be written.
     """
     logger.info("Starting pre-flight Git checks...")
     dev_repo = ensure_clean_workspace(dev_repo_path)
@@ -247,7 +327,11 @@ def perform_release(
         sys.exit(1)
 
     logger.info("Starting synchronization...")
-    sync_files(dev_repo_path, prod_repo_path, exclude_patterns, dry_run)
+    changes = sync_files(dev_repo_path, prod_repo_path, exclude_patterns, dry_run)
+
+    if dry_run or output_plan is not None:
+        resolved_plan_path = output_plan or Path("sync-plan.md").resolve()
+        write_sync_plan(resolved_plan_path, target_env, stable_branch, changes, dry_run)
 
     if dry_run:
         typer.secho("Dry-run: Skipping git add, commit, and push.", fg=typer.colors.YELLOW)
